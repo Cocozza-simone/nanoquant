@@ -370,9 +370,7 @@ NANOQUANT Team
 
 ## 🙋 Support
 
-- **Issues**: [GitHub Issues](https://github.com/yourorg/nanoquant/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourorg/nanoquant/discussions)
-- **Email**: support@nanoquant.dev
+- **Email**: cocozzasimone00@gmail.com
 
 ---
 
@@ -727,9 +725,7 @@ Simone cocozza
 
 ## 🙋 Supporto
 
-- **Issues**: [GitHub Issues](https://github.com/yourorg/nanoquant/issues)
-- **Discussioni**: [GitHub Discussions](https://github.com/yourorg/nanoquant/discussions)
-- **Email**: support@nanoquant.dev
+- **Email**: cocozzasimone00@gmail.com
 
 ---
 
