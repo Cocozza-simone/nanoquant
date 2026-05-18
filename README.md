@@ -1,0 +1,313 @@
+# NANOQUANT
+
+**Sub-1-bit Post-Training Quantization for Large Language Models**
+
+This is a clean implementation of [NANOQUANT](https://arxiv.org/abs/2602.06694) with a minimal codebase.
+
+## Overview
+
+NANOQUANT achieves sub-1-bit compression of LLMs through:
+1. **Low-rank binary factorization**: W ≈ s1 ⊙ (U±1 V±1^T) ⊙ s2^T
+2. **Robust Hessian preconditioning**: Activation-aware diagonal preconditioners with shrinkage
+3. **Latent Binary ADMM (LB-ADMM)**: Efficient initialization with O(r³/3) complexity via Cholesky
+4. **Block reconstruction pipeline**: Three-step sequential optimization
+5. **Custom binary kernels**: Optimized inference with packed storage
+
+## Project Structure
+
+```
+nanoquant/
+├── src/nanoquant/           # Main package
+│   ├── __init__.py
+│   ├── config.py            # Configuration (model-family-specific hyperparams)
+│   ├── calibration.py       # Global calibration with robust Hessian preconditioning
+│   ├── admm.py              # LB-ADMM solver with Cholesky decomposition
+│   ├── svid.py              # Sign-Value Independent Decomposition
+│   ├── reconstruction.py    # Block pipeline + Model reconstruction
+│   ├── error_mitigation.py  # Error Propagation Mitigation (TUNEFP)
+│   ├── refinement.py        # Factorized Component Refinement (TUNELATENTSTE)
+│   ├── model_reconstruction.py  # Global Scale Tuning (TUNESCALESKD)
+│   ├── quantization.py      # Main quantizer with save/load
+│   ├── evaluation.py        # Evaluation tools
+│   ├── packing.py           # Binary bit-packing for storage (Fig 2c)
+│   ├── kernels.py           # Optimized binary GEMV/GEMM kernels
+│   └── inference.py         # Optimized inference engine
+├── scripts/
+│   ├── quantize.py          # Quantization script
+│   └── evaluate.py          # Evaluation script
+├── tests/
+│   └── test_nanoquant.py    # Comprehensive unit tests
+├── examples/
+│   ├── basic_usage.py       # Basic usage example
+│   └── test_components.py   # Component testing demo
+├── pyproject.toml
+└── README.md
+```
+
+## Installation
+
+```bash
+pip install -e ".[dev]"
+```
+
+## Quick Start
+
+```python
+from nanoquant import NanoQuantConfig, NanoQuantizer
+
+# Configure quantization
+config = NanoQuantConfig(
+    model_name="meta-llama/Llama-2-7b-hf",
+    rank=8,
+    bits=1.0,  # 1-bit compression
+    calib_samples=128,
+)
+
+# Run quantization
+quantizer = NanoQuantizer(config)
+quantizer.load_model()
+quantizer.quantize()
+
+# Evaluate
+results = quantizer.evaluate()
+print(f"Perplexity: {results['perplexity']}")
+
+# Save
+quantizer.save_quantized_model("./outputs/quantized")
+```
+
+## Algorithm
+
+The NANOQUANT algorithm (Algorithm 1 from the paper) consists of three phases:
+
+### Phase 1: Global Calibration
+- Collects activation and gradient statistics from all linear layers
+- Computes robust diagonal preconditioners D_in, D_out with shrinkage regularization
+- Model-family-specific hyperparameters:
+  - **γ = 0.2** for Llama and Qwen models
+  - **γ = 0.6** for Gemma and Rnj models
+
+### Phase 2: Block Reconstruction Pipeline
+For each transformer block, three steps:
+
+**Step 1 - Error Propagation Mitigation (TUNEFP)**:
+- Tunes full-precision weights to minimize accumulated quantization error
+- Learning rate: 1e-4, Batch size: 4, Epochs: 8 (with cosine scheduler)
+
+**Step 2 - Low-Rank Binary Initialization (LB-ADMM)**:
+- Hessian-aware preconditioning: W_f = D_out^(1/2) * W * D_in^(1/2)
+- ADMM solver with Cholesky decomposition (O(r³/3) complexity)
+- SVID (Sign-Value Independent Decomposition) for proxy updates
+- Magnitude balancing: η = ||V||_F / ||U||_F
+- Scale extraction: s1 = mean(|η*u|), s2 = mean(|η^(-1)*v|)
+
+**Step 3 - Factorized Component Refinement (TUNELATENTSTE)**:
+- Jointly tunes U, V, s1, s2 using Straight-Through Estimator (STE)
+- Objective: min ||B(X) - B_b(X; sign(U), sign(V), s1, s2)||²_F
+- Learning rate: 1e-5, Batch size: 1, Epochs: 8 (with cosine scheduler)
+
+### Phase 3: Model Reconstruction (TUNESCALESKD)
+- Optimizes floating-point scaling vectors S_global
+- Objective: min ||Logits(M) - Logits(M_c)||_KL
+- Learning rate: 1e-6, Batch size: 1, Epochs: 8 (with cosine scheduler)
+- Binary weights remain frozen and packed throughout
+
+### Packing (Figure 2c)
+- Maps {-1, +1} to {0, 1}
+- Packs into 8-bit integer blocks
+- Enables significant memory savings
+
+## Key Features
+
+- **Sub-1-bit compression**: Achieves compression below 1 bit per parameter with dynamic rank adaptation
+- **Post-training quantization**: No retraining required, uses only 128 calibration samples
+- **Low-rank binary factorization**: W ≈ s1 ⊙ (U±1 V±1^T) ⊙ s2^T
+- **Efficient ADMM solver**: Hessian-aware preconditioning with Cholesky decomposition (O(r³/3))
+- **Block-wise reconstruction**: Sequential optimization with error propagation mitigation
+- **SVID decomposition**: Sign-Value Independent Decomposition for proxy updates
+- **Binary bit-packing**: Efficient storage with {-1, +1} → {0, 1} packing into 8-bit blocks
+- **Optimized inference kernels**: Custom binary GEMV for fast inference
+- **Complete model save/load**: Full reconstruction of quantized models from checkpoints
+- **Inference engine**: Optimized inference with memory usage tracking and benchmarking
+- **Scalable**: Compresses 70B models on a single GPU in hours
+
+## Testing
+
+```bash
+# Run all tests
+python -m pytest tests/ -v
+
+# Run specific test
+python -m pytest tests/test_nanoquant.py::TestADMM -v
+
+# Test components demo
+python examples/test_components.py
+```
+
+## Advanced Usage
+
+### SVID Decomposition
+
+```python
+from nanoquant.svid import svid_decompose, project_to_binary_low_rank
+
+# Apply SVID to a matrix
+P = torch.randn(32, 16)
+Z = svid_decompose(P, rank=1)  # Rank-1 SVID approximation
+
+# Project to binary low-rank set (used in ADMM)
+Z_proj = project_to_binary_low_rank(P, rank=1)
+```
+
+### Error Propagation Mitigation (TUNEFP)
+
+```python
+from nanoquant.error_mitigation import tune_full_precision_weights
+
+# Tune full-precision weights before factorization
+tuned_block = tune_full_precision_weights(
+    block=transformer_block,
+    dataloader=calibration_data,
+    model=full_model,
+    block_idx=layer_idx,
+    num_epochs=8,
+    learning_rate=1e-4,
+    batch_size=4,
+)
+```
+
+### Factorized Component Refinement (TUNELATENTSTE)
+
+```python
+from nanoquant.refinement import tune_latent_ste, StraightThroughEstimator
+
+# Refine factorized components with STE
+ste = StraightThroughEstimator.apply
+refined_layers = tune_latent_ste(
+    block=transformer_block,
+    factorized_layers=factorized_dict,
+    dataloader=calibration_data,
+    model=full_model,
+    block_idx=layer_idx,
+    num_epochs=8,
+    learning_rate=1e-5,
+    batch_size=1,
+)
+```
+
+### Model Reconstruction (TUNESCALESKD)
+
+```python
+from nanoquant.model_reconstruction import tune_scales_kd
+
+# Global scale tuning via KL divergence
+quantized_model = tune_scales_kd(
+    quantized_model=q_model,
+    original_model=fp_model,
+    dataloader=calibration_data,
+    num_epochs=8,
+    learning_rate=1e-6,
+    batch_size=1,
+    temperature=1.0,
+)
+```
+
+### Binary Packing
+
+```python
+from nanoquant.packing import PackedBinaryStorage
+
+# Pack all binary weights for efficient storage
+storage = PackedBinaryStorage()
+for name, (U, V) in binary_weights.items():
+    storage.add_layer(name, U, V)
+
+# Get compression stats
+stats = storage.get_compression_stats()
+print(f"Space savings: {stats['space_savings']:.1f}%")
+
+# Save/load packed storage
+state = storage.state_dict()
+# ... later ...
+storage = PackedBinaryStorage.from_state_dict(state)
+U, V = storage.get_layer("layer1")
+```
+
+### Optimized Kernels
+
+```python
+from nanoquant.kernels import OptimizedFactorizedLinear
+
+# Create optimized layer with packed weights
+layer = OptimizedFactorizedLinear(
+    d_out=512, d_in=256, rank=8,
+    U_binary=U, V_binary=V,
+    s1=s1, s2=s2,
+    packed=True  # Enable bit-packing
+)
+
+# Forward pass with optimized binary operations
+output = layer(input_tensor)
+
+# Check memory usage
+mem = layer.get_memory_usage()
+print(f"Effective bits: {mem['effective_bits']:.2f}")
+```
+
+### Inference Engine
+
+```python
+from nanoquant.inference import create_inference_engine
+
+# Load quantized model for inference
+engine = create_inference_engine("./outputs/quantized")
+engine.load()
+
+# Generate text
+texts = engine.generate("The future of AI is", max_length=100)
+print(texts[0])
+
+# Benchmark inference
+results = engine.benchmark(num_runs=10)
+print(f"Speed: {results['tokens_per_sec']:.2f} tokens/sec")
+
+# Check memory usage
+memory = engine.get_memory_usage()
+print(f"Compression: {memory['compression_ratio']:.2f}x")
+```
+
+### Model-Family-Specific Configuration
+
+```python
+from nanoquant.config import NanoQuantConfig
+
+# Automatically adapts hyperparameters for model family
+config = NanoQuantConfig(model_name="meta-llama/Llama-2-7b-hf")
+config.adapt_for_model_family(config.model_name)
+# shrinkage_gamma = 0.2 for Llama
+
+config2 = NanoQuantConfig(model_name="google/gemma-2b")
+config2.adapt_for_model_family(config2.model_name)
+# shrinkage_gamma = 0.6 for Gemma
+```
+
+## Citation
+
+```bibtex
+@article{nanoquant2025,
+  title={NANOQUANT: Efficient Sub-1-Bit Quantization of Large Language Models},
+  author={NANOQUANT Authors},
+  journal={arXiv preprint},
+  year={2025}
+}
+```
+
+## References
+
+Key papers referenced in this implementation:
+- **NANOQUANT**: "Efficient Sub-1-Bit Quantization of Large Language Models" (2025)
+- **DBF**: Boža & Macko, "Addition Is Almost All You Need: Compressing Neural Networks with Double Binary Factorization" (2025)
+- **SVID**: Pouransari et al., "Least Squares Binary Quantization of Neural Networks" (2020)
+- **STE**: Bengio et al., "Estimating or Propagating Gradients Through Stochastic Neurons" (2013)
+- **K-FAC**: Martens & Grosse, "Optimizing Neural Networks with Kronecker-Factored Approximate Curvature" (2015)
+- **Shrinkage**: Ledoit & Wolf, "A Well-Conditioned Estimator for Large-Dimensional Covariance Matrices" (2004)
