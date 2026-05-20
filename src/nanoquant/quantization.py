@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import logging
 import copy
+import gc
 from typing import Dict, List, Optional, Tuple
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from .config import NanoQuantConfig
@@ -229,12 +230,21 @@ class NanoQuantizer:
                     self._replace_layer(self.model, layer_name, fl)
                 
                 logger.info(f"  Block {block_idx + 1} reconstructed successfully")
-                
+
             except Exception as e:
                 logger.error(f"  Error reconstructing block {block_idx + 1}: {e}")
                 logger.error("  Skipping this block, keeping original weights")
                 continue
-        
+
+            finally:
+                # Clean up intermediate tensors to avoid memory buildup
+                del X, Y_star
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+
         return self.model
     
     def _model_reconstruction(self):
@@ -243,29 +253,27 @@ class NanoQuantizer:
         calib_input_ids, calib_attention_mask = self._get_calibration_inputs()
         calib_input_ids = calib_input_ids.to(self.config.device)
         calib_attention_mask = calib_attention_mask.to(self.config.device)
-        
-        # Create a reference model for logits
-        with torch.no_grad():
-            ref_model = copy.deepcopy(self.model)
-            # Unpack factorized layers to get continuous approximation
-            for module in ref_model.modules():
-                if isinstance(module, FactorizedLinear):
-                    module.packed = False
-        
+
         reconstructor = ModelReconstruction(self.config)
-        
+
         # Use subset of calibration data for global tuning
         n_samples = min(32, len(calib_input_ids))
+
+        # Compute reference logits from current model without deep copy
+        self.model.eval()
+        with torch.no_grad():
+            ref_outputs = self.model(
+                input_ids=calib_input_ids[:n_samples],
+                attention_mask=calib_attention_mask[:n_samples],
+            )
+            ref_logits = ref_outputs.logits.detach().clone()
+
         reconstructor.reconstruct(
             quantized_model=self.model,
-            original_model=ref_model,
             input_ids=calib_input_ids[:n_samples],
             attention_mask=calib_attention_mask[:n_samples],
+            original_logits=ref_logits,
         )
-        
-        # Clean up
-        del ref_model
-        torch.cuda.empty_cache()
     
     def _get_calibration_inputs(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Get calibration data.

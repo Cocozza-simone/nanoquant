@@ -7,4 +7,9 @@
 /.DS_Store
 /.env
 /.env.*
+*.pyc
+*.pyo
+*.pyd
+*.log
 .pyc
+*/__pycache__/*

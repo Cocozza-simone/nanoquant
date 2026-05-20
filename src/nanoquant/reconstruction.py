@@ -430,23 +430,26 @@ class ModelReconstruction:
     def reconstruct(
         self,
         quantized_model: nn.Module,
-        original_model: nn.Module,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        original_model: Optional[nn.Module] = None,
+        original_logits: Optional[torch.Tensor] = None,
     ):
         """Global scale tuning via KL divergence minimization.
-        
+
         Args:
             quantized_model: Quantized model with packed binary weights
-            original_model: Original full-precision model
             input_ids: Input tokens for calibration
             attention_mask: Attention mask
+            original_model: Original full-precision model (optional if original_logits is provided)
+            original_logits: Pre-computed reference logits (alternative to original_model)
         """
         logger.info("Starting Model Reconstruction (Global Scale Tuning)...")
-        
-        original_model.eval()
+
+        if original_model is not None:
+            original_model.eval()
         quantized_model.train()
-        
+
         # Collect all scale parameters from factorized layers
         scale_params = []
         for module in quantized_model.modules():
@@ -454,18 +457,23 @@ class ModelReconstruction:
                 module.s1.requires_grad = True
                 module.s2.requires_grad = True
                 scale_params.extend([module.s1, module.s2])
-        
+
         # If no FactorizedLinear modules found, skip reconstruction
         if len(scale_params) == 0:
             logger.warning("No FactorizedLinear modules found in model. Skipping Model Reconstruction.")
             return
-        
+
         optimizer = torch.optim.Adam(scale_params, lr=self.config.glob_tune_lr)
-        
+
         # Get original logits
-        with torch.no_grad():
-            orig_outputs = original_model(input_ids, attention_mask=attention_mask)
-            orig_logits = orig_outputs.logits
+        if original_logits is not None:
+            orig_logits = original_logits
+        elif original_model is not None:
+            with torch.no_grad():
+                orig_outputs = original_model(input_ids, attention_mask=attention_mask)
+                orig_logits = orig_outputs.logits
+        else:
+            raise ValueError("Either original_model or original_logits must be provided")
         
         for step in range(self.config.glob_tune_steps):
             optimizer.zero_grad()
