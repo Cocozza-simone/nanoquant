@@ -110,10 +110,19 @@ class NanoQuantConfig:
     seed: int = 42
     output_dir: str = "./outputs"
     
+    # === Nuovi parametri MoE (da QMoE - IST-DASLab) ===
+    moe_enabled: bool = False              # Abilita modalità MoE
+    quantize_only_experts: bool = False    # Quantizza solo gli expert
+    tie_hessians: bool = True              # Riusa Hessiano per gate/up (risparmio memoria)
+    expert_parallelism: bool = False       # Sharding expert su più GPU
+    
     def __post_init__(self):
         """Auto-adjust parameters based on device for memory efficiency."""
         # Resolve device
         self.device = get_optimal_device(self.device)
+        
+        # Auto-adapt parameters based on model family
+        self.adapt_for_model_family(self.model_name)
         
         # Apply MPS-specific optimizations for memory efficiency
         if self.device == "mps":
@@ -144,10 +153,20 @@ class NanoQuantConfig:
     def adapt_for_model_family(self, model_name: str):
         """Adapt hyperparameters based on model family."""
         lower_name = model_name.lower()
+        
+        # Model family-specific shrinkage gamma
         if "gemma" in lower_name or "rnj" in lower_name:
             self.shrinkage_gamma = 0.6
         elif "llama" in lower_name or "qwen" in lower_name:
             self.shrinkage_gamma = 0.2
+        
+        # === Nuovo: MoE model detection (da QMoE) ===
+        moe_models = ["mixtral", "deepseek", "switch", "qwen2-moe", "output-llm"]
+        if any(moe in lower_name for moe in moe_models):
+            self.moe_enabled = True
+            if "deepseek" in lower_name:
+                self.tie_hessians = True  # Ottimizzazione memoria per DeepSeek
+        
         # Adjust rank based on model size
         if "70b" in lower_name:
             self.rank = min(self.rank, 16)

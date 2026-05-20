@@ -3,6 +3,9 @@ Latent Binary ADMM (LB-ADMM) for Low-Rank Binary Factorization.
 
 Implements the ADMM solver for initializing low-rank binary matrices
 and scaling vectors, as described in Section 3.2 of the paper.
+
+Integrations:
+- Ternary initialization from QMoE (IST-DASLab) for better convergence
 """
 
 import torch
@@ -59,12 +62,16 @@ class LatentBinaryADMM:
         lambda_reg: float = 0.01,
         epsilon: float = 1e-5,
         device: Optional[str] = None,
+        use_ternary_init: bool = True,       # ispirato a QMoE (IST-DASLab)
+        ternary_sparsity: float = 0.9,       # 90% dei pesi -> zero prima dell'SVD
     ):
         self.rank = rank
         self.num_iterations = num_iterations
         self.rho = rho
         self.lambda_reg = lambda_reg
         self.epsilon = epsilon
+        self.use_ternary_init = use_ternary_init
+        self.ternary_sparsity = ternary_sparsity
         # Auto-detect device: use CPU on macOS (no CUDA support)
         if device is None:
             self.device = "cpu"
@@ -94,9 +101,27 @@ class LatentBinaryADMM:
         d_out, d_in = W_f.shape
         r = min(self.rank, min(d_out, d_in))
         
-        # Initialize variables
-        U = torch.randn(d_out, r, device=self.device) * 0.01
-        V = torch.randn(d_in, r, device=self.device) * 0.01
+        # Inizializzazione U, V
+        # DEFAULT (originale): rumore gaussiano casuale
+        # NUOVO con ternary_init: SVD sulla proiezione ternaria di W_f
+        # (ispirato a QMoE: la sparsita' ternaria ~90% porta l'init
+        #  vicino alla soluzione, riducendo le iterazioni ADMM necessarie)
+        if self.use_ternary_init:
+            try:
+                from .ternary_init import ternary_svd_init, estimate_init_quality
+                U, V = ternary_svd_init(W_f, rank=r, sparsity=self.ternary_sparsity)
+                U = U.to(self.device)
+                V = V.to(self.device)
+                init_err = estimate_init_quality(W_f, U, V)
+                logger.debug(f"Ternary SVD init: errore relativo iniziale = {init_err:.4f}")
+            except ImportError:
+                logger.warning("ternary_init not available, using Gaussian initialization")
+                U = torch.randn(d_out, r, device=self.device) * 0.01
+                V = torch.randn(d_in, r, device=self.device) * 0.01
+        else:
+            # Comportamento originale
+            U = torch.randn(d_out, r, device=self.device) * 0.01
+            V = torch.randn(d_in, r, device=self.device) * 0.01
         
         # Auxiliary variables
         Z_U = U.clone()
