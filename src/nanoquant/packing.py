@@ -16,62 +16,118 @@ from .device_utils import get_optimal_device
 logger = logging.getLogger(__name__)
 
 
+def torch_packbits(bits: torch.Tensor) -> torch.Tensor:
+    """Pack a uint8 tensor (values 0 or 1) into uint8 bytes using PyTorch-native ops.
+
+    Uses big-endian bit ordering (MSB first) to match np.packbits output.
+
+    Args:
+        bits: uint8 tensor with values in {0, 1}, any shape
+
+    Returns:
+        Packed uint8 tensor
+    """
+    # Flatten tensor
+    bits = bits.reshape(-1)
+    num_elements = bits.numel()
+
+    # Pad to multiple of 8
+    if num_elements % 8 != 0:
+        padding = 8 - (num_elements % 8)
+        bits = torch.cat([bits, torch.zeros(padding, dtype=torch.uint8, device=bits.device)])
+
+    # Reshape to [-1, 8]
+    bits = bits.reshape(-1, 8)
+
+    # Big-endian weights: MSB first (128, 64, 32, 16, 8, 4, 2, 1)
+    weights = torch.tensor([128, 64, 32, 16, 8, 4, 2, 1], dtype=torch.uint8, device=bits.device)
+
+    # Hadamard product and sum to get packed bytes
+    packed = (bits.to(torch.int16) * weights.to(torch.int16)).sum(dim=1).to(torch.uint8)
+
+    return packed
+
+
+def torch_unpackbits(packed: torch.Tensor, num_elements: int) -> torch.Tensor:
+    """Unpack a uint8 tensor into bits using PyTorch-native ops.
+
+    Uses big-endian bit ordering (MSB first) to match np.unpackbits input.
+
+    Args:
+        packed: uint8 tensor with packed bits
+        num_elements: Number of elements to return
+
+    Returns:
+        uint8 tensor with values in {0, 1}
+    """
+    # Create shift positions (MSB first: 7 down to 0)
+    shifts = torch.arange(7, -1, -1, dtype=torch.int64, device=packed.device)
+
+    # Unpack each byte: ((packed >> shift) & 1) for each shift position
+    bits = ((packed.unsqueeze(1).long() >> shifts) & 1).to(torch.uint8).reshape(-1)
+
+    # Return only the requested number of elements
+    return bits[:num_elements]
+
+
 def pack_binary_tensor(tensor: torch.Tensor) -> Tuple[torch.Tensor, Tuple]:
     """Pack a binary tensor {-1, +1} into packed bits.
-    
+
     Maps -1 -> 0, +1 -> 1 and packs into uint8 blocks.
-    
+
     Args:
         tensor: Binary tensor with values in {-1, +1}, any shape
-        
+
     Returns:
         Tuple of (packed_tensor, original_shape)
     """
     # Flatten tensor
     original_shape = tensor.shape
     flat = tensor.reshape(-1)
-    
+
     # Map {-1, +1} -> {0, 1}
     bits = ((flat + 1) / 2).clamp(0, 1).to(torch.uint8)
-    
-    # Pack 8 bits per uint8
-    num_elements = bits.numel()
-    packed_size = (num_elements + 7) // 8
-    
-    # Pad to multiple of 8
-    if num_elements % 8 != 0:
-        padding = 8 - (num_elements % 8)
-        bits = torch.cat([bits, torch.zeros(padding, dtype=torch.uint8, device=bits.device)])
-    
-    # Pack bits into uint8
-    bits_cpu = bits.cpu().numpy()
-    packed = np.packbits(bits_cpu)
-    packed_tensor = torch.from_numpy(packed).to(tensor.device)
-    
+
+    # Pack 8 bits per uint8 using native PyTorch ops
+    try:
+        packed_tensor = torch_packbits(bits)
+    except Exception:
+        # Fallback to NumPy path for compatibility
+        num_elements = bits.numel()
+        if num_elements % 8 != 0:
+            padding = 8 - (num_elements % 8)
+            bits = torch.cat([bits, torch.zeros(padding, dtype=torch.uint8, device=bits.device)])
+        bits_cpu = bits.cpu().numpy()
+        packed = np.packbits(bits_cpu)
+        packed_tensor = torch.from_numpy(packed).to(tensor.device)
+
     return packed_tensor, original_shape
 
 
 def unpack_binary_tensor(packed: torch.Tensor, original_shape: Tuple[int, ...]) -> torch.Tensor:
     """Unpack bits back to binary tensor {-1, +1}.
-    
+
     Args:
         packed: Packed uint8 tensor
         original_shape: Original shape of the binary tensor
-        
+
     Returns:
         Unpacked binary tensor with values in {-1, +1}
     """
-    # Unpack uint8 to bits
-    packed_cpu = packed.cpu().numpy()
-    bits = torch.from_numpy(np.unpackbits(packed_cpu)).to(packed.device)
-    
-    # Take only needed elements
     num_elements = int(np.prod(original_shape))
-    bits = bits[:num_elements]
-    
+
+    # Use native PyTorch path first
+    try:
+        bits = torch_unpackbits(packed, num_elements)
+    except Exception:
+        # Fallback to NumPy path for compatibility
+        packed_cpu = packed.cpu().numpy()
+        bits = torch.from_numpy(np.unpackbits(packed_cpu)).to(packed.device)
+        bits = bits[:num_elements]
+
     # Map {0, 1} -> {-1, +1}
     binary = bits.float() * 2 - 1
-    
+
     # Reshape to original shape
     return binary.reshape(original_shape)
 

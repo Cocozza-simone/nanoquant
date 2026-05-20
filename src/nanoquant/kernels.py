@@ -144,12 +144,13 @@ class OptimizedFactorizedLinear(nn.Module):
         W = self.s1.unsqueeze(1) * (U @ V.T) * self.s2.unsqueeze(0)
         return W
     
+    @torch.compile(mode="reduce-overhead")
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass using optimized binary operations.
-        
+
         Args:
             x: Input [..., d_in]
-            
+
         Returns:
             Output [..., d_out]
         """
