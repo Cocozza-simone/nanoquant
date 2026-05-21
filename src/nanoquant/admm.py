@@ -10,38 +10,12 @@ Integrations:
 
 import torch
 import torch.nn as nn
+import numpy as np
 import logging
 from typing import Tuple, Optional
+from .svid import svid_rank1_fast
 
 logger = logging.getLogger(__name__)
-
-
-def svd_sign_value_decomposition(M: torch.Tensor, rank: int) -> torch.Tensor:
-    """Sign-Value Independent Decomposition (SVID).
-    
-    Computes the optimal rank-1 approximation that preserves sign structure.
-    This is a variant of SVD that maintains sign information.
-    
-    Args:
-        M: Input matrix [m, n]
-        rank: Target rank
-        
-    Returns:
-        Rank-r approximation with preserved signs
-    """
-    try:
-        U, S, Vh = torch.linalg.svd(M, full_matrices=False)
-        # Keep top-r singular values
-        S_r = torch.zeros_like(S)
-        S_r[:min(rank, len(S))] = S[:min(rank, len(S))]
-        # Reconstruct
-        M_approx = U @ torch.diag(S_r) @ Vh
-        # Preserve signs from original
-        M_approx = M_approx.sign() * M_approx.abs()
-        return M_approx
-    except Exception as e:
-        logger.warning(f"SVD failed, using direct approximation: {e}")
-        return M
 
 
 class LatentBinaryADMM:
@@ -64,6 +38,7 @@ class LatentBinaryADMM:
         device: Optional[str] = None,
         use_ternary_init: bool = True,       # ispirato a QMoE (IST-DASLab)
         ternary_sparsity: float = 0.9,       # 90% dei pesi -> zero prima dell'SVD
+        seed: Optional[int] = None,          # seed per riproducibilità (paper Appendix C)
     ):
         self.rank = rank
         self.num_iterations = num_iterations
@@ -72,6 +47,7 @@ class LatentBinaryADMM:
         self.epsilon = epsilon
         self.use_ternary_init = use_ternary_init
         self.ternary_sparsity = ternary_sparsity
+        self.seed = seed
         # Auto-detect device: use CPU on macOS (no CUDA support)
         if device is None:
             self.device = "cpu"
@@ -98,6 +74,11 @@ class LatentBinaryADMM:
                 s1: Output channel scale [d_out]
                 s2: Input channel scale [d_in]
         """
+        # Fix seed for reproducibility (paper Appendix C)
+        if self.seed is not None:
+            torch.manual_seed(self.seed)
+            np.random.seed(self.seed)
+        
         d_out, d_in = W_f.shape
         r = min(self.rank, min(d_out, d_in))
         
@@ -169,11 +150,12 @@ class LatentBinaryADMM:
                 V = (torch.linalg.pinv(A_v) @ B_v).T
             
             # Step 3: Update Z using SVID (Equation 6)
+            # Use svid_rank1_fast from svid.py (correct implementation)
             P_U = U + Lambda_U
             P_V = V + Lambda_V
             
-            Z_U = svd_sign_value_decomposition(P_U, rank=r)
-            Z_V = svd_sign_value_decomposition(P_V, rank=r)
+            Z_U = svid_rank1_fast(P_U)
+            Z_V = svid_rank1_fast(P_V)
             
             # Step 4: Update dual variables
             Lambda_U = Lambda_U + U - Z_U
@@ -219,14 +201,15 @@ class LatentBinaryADMM:
         d_out, rank = U.shape
         d_in, _ = V.shape
         
-        # Apply preconditioner inverse if available
+        # Apply preconditioner inverse (Equation 9: depreconditioning)
+        # Paper: Û = P_U^(K) · D̃_out^{-1}, so divide by sqrt(D), not multiply
         if D_out is not None:
-            U_b = U * (D_out.sqrt().unsqueeze(1) + 1e-8)
+            U_b = U / (D_out.sqrt().unsqueeze(1) + 1e-8)
         else:
             U_b = U
             
         if D_in is not None:
-            V_b = V * (D_in.sqrt().unsqueeze(1) + 1e-8)
+            V_b = V / (D_in.sqrt().unsqueeze(1) + 1e-8)
         else:
             V_b = V
         
