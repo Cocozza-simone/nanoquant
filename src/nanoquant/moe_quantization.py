@@ -21,6 +21,7 @@ import logging
 from typing import Dict, Optional, Tuple, Any
 from .config import NanoQuantConfig
 from .admm import LatentBinaryADMM
+from .reconstruction import FactorizedLinear
 
 logger = logging.getLogger(__name__)
 
@@ -70,17 +71,20 @@ class MoEExpertQuantizer:
         self,
         model: nn.Module,
         hessians: Optional[Dict[str, torch.Tensor]] = None,
+        preconditioners: Optional[Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]] = None,
     ) -> nn.Module:
         """Quantizza un modello MoE applicando ADMM selettivamente.
         
         Args:
             model: Modello PyTorch (es. LlamaForCausalLM, MixtralForCausalLM)
-            hessians: Dict di Hessiani precalcolati per ogni layer
-                     Se None, non usa preconizionamento
+            hessians: Dict di Hessiani precalcolati per ogni layer (deprecated)
+            preconditioners: Tuple of (D_in, D_out) dicts from GlobalCalibration.compute_preconditioners()
+                            Se None, non usa preconditioning (degrada la qualità)
         
         Returns:
             Modello quantizzato (modificato in-place)
         """
+        D_in, D_out = preconditioners if preconditioners else ({}, {})
         quantized_count = 0
         skipped_count = 0
         
@@ -102,43 +106,60 @@ class MoEExpertQuantizer:
                 skipped_count += 1
                 continue
             
-            # Estrai pesi e Hessiano
+            # Estrai pesi
             W = module.weight.data  # [out_features, in_features]
-            
-            # Hessiano: cerca chiave esatta o variante con tie_hessians
-            hessian_key = name
-            if hessians and self.config.tie_hessians and "up_proj" in name:
-                # Prova a riusare Hessiano da gate_proj
-                gate_key = name.replace(".up_proj", ".gate_proj")
-                if gate_key in hessians:
-                    hessian_key = gate_key
-            
-            H = hessians.get(hessian_key) if hessians else None
-            
-            # Quantizza il layer
-            try:
+            d_out, d_in = W.shape
+
+            # K-FAC: cerca precondizionatori per questo layer
+            D_in_layer = D_in.get(name) if D_in else None
+            D_out_layer = D_out.get(name) if D_out else None
+
+            # Quantizza il layer con/ senza preconditioning
+            if D_in_layer is not None and D_out_layer is not None:
+                # Verifica dimensioni
+                if len(D_in_layer) == d_in and len(D_out_layer) == d_out:
+                    # Applica K-FAC preconditioning: W_f = D_out^{1/2} W D_in^{1/2}
+                    # (cfr. BlockReconstructionPipeline._initialize_binary_factors)
+                    D_out_sqrt = D_out_layer.sqrt()
+                    D_in_sqrt = D_in_layer.sqrt()
+                    W_f = D_out_sqrt.unsqueeze(1) * W * D_in_sqrt.unsqueeze(0)
+                    U, V, s1, s2 = self.admm_solver.solve(W_f, D_in_layer, D_out_layer)
+                else:
+                    U, V, s1, s2 = self.admm_solver.solve_simple(W)
+            else:
                 U, V, s1, s2 = self.admm_solver.solve_simple(W)
-                
-                # Binarizza
-                U_binary = torch.sign(U).to(torch.int8)
-                V_binary = torch.sign(V).to(torch.int8)
-                
-                # Sostituisci pesi (semplice approssimazione per demo)
-                # In pratica, userai l'inference engine optimized
-                W_approx = s1.unsqueeze(1) * (U_binary.float() @ V_binary.float().T) * s2.unsqueeze(0)
-                
-                # Copia il peso approssimato indietro
-                module.weight.data = W_approx.to(module.weight.dtype)
-                
-                quantized_count += 1
-                layer_type = "expert" if is_expert else "shared"
-                logger.debug(
-                    f"Quantized {layer_type} layer: {name} "
-                    f"[{W.shape[0]}x{W.shape[1]} → rank={U.shape[1]}]"
-                )
-            except Exception as e:
-                logger.warning(f"Failed to quantize {name}: {e}")
-                skipped_count += 1
+
+            # Crea FactorizedLinear preservando la struttura binaria
+            factorized_layer = FactorizedLinear(
+                d_out=d_out,
+                d_in=d_in,
+                rank=U.shape[1],
+                U=U,
+                V=V,
+                s1=s1,
+                s2=s2,
+                bias=module.bias.data if module.bias is not None else None,
+            )
+            # Congela i pesi binari (cruciale per inferenza ottimizzata)
+            factorized_layer.pack()
+
+            # Sostituisci il modulo nel modello
+            parts = name.split(".")
+            parent = model
+            for part in parts[:-1]:
+                if part.isdigit():
+                    parent = parent[int(part)]
+                else:
+                    parent = getattr(parent, part)
+            child_name = parts[-1]
+            setattr(parent, child_name, factorized_layer)
+
+            quantized_count += 1
+            layer_type = "expert" if is_expert else "shared"
+            logger.debug(
+                f"Quantized {layer_type} layer: {name} "
+                f"[{W.shape[0]}x{W.shape[1]} → rank={U.shape[1]}, FactorizedLinear]"
+            )
         
         logger.info(
             f"MoE quantization complete: {quantized_count} layers quantized, {skipped_count} skipped"
