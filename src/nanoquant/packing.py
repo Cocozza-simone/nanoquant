@@ -98,7 +98,7 @@ def pack_binary_tensor(tensor: torch.Tensor) -> Tuple[torch.Tensor, Tuple]:
             padding = 8 - (num_elements % 8)
             bits = torch.cat([bits, torch.zeros(padding, dtype=torch.uint8, device=bits.device)])
         bits_cpu = bits.cpu().numpy()
-        packed = np.packbits(bits_cpu)
+        packed = np.packbits(bits_cpu, bitorder='big')
         packed_tensor = torch.from_numpy(packed).to(tensor.device)
 
     return packed_tensor, original_shape
@@ -122,7 +122,7 @@ def unpack_binary_tensor(packed: torch.Tensor, original_shape: Tuple[int, ...]) 
     except Exception:
         # Fallback to NumPy path for compatibility
         packed_cpu = packed.cpu().numpy()
-        bits = torch.from_numpy(np.unpackbits(packed_cpu)).to(packed.device)
+        bits = torch.from_numpy(np.unpackbits(packed_cpu, bitorder='big')).to(packed.device)
         bits = bits[:num_elements]
 
     # Map {0, 1} -> {-1, +1}
