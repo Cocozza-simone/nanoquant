@@ -247,6 +247,25 @@ class TestPacking:
         assert torch.allclose(U, U_ret)
         assert torch.allclose(V, V_ret)
 
+    def test_torch_numpy_packbits_byte_identity(self):
+        from nanoquant.packing import torch_packbits
+        import numpy as np
+
+        # Test various sizes including multiples and non-multiples of 8
+        for size in [8, 16, 24, 32, 64, 100, 128, 256]:
+            # Create random {0, 1} bits using explicit uniform integers
+            bits = torch.randint(0, 2, (size,), dtype=torch.uint8)
+
+            # PyTorch path
+            torch_packed = torch_packbits(bits)
+
+            # NumPy path - replicate the exact same logic from fallback path
+            np_bits = bits.cpu().numpy()
+            np_packed_obj = np.packbits(np_bits)
+            np_packed = torch.from_numpy(np_packed_obj)
+
+            assert torch.equal(torch_packed, np_packed), f"Byte mismatch at size {size} (torch:{torch_packed[:5].tolist()} vs np:{np_packed[:5].tolist()})"
+
 
 class TestKernels:
     """Tests for optimized binary kernels."""

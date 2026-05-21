@@ -359,13 +359,14 @@ class NanoQuantizer:
         handle_out = block_module.register_forward_hook(output_hook)
         handles.extend([handle_in, handle_out])
         
-        # Forward pass
-        with torch.no_grad():
-            model(input_ids=input_ids[:8], attention_mask=attention_mask[:8])
-        
-        # Remove hooks
-        for h in handles:
-            h.remove()
+        try:
+            # Forward pass
+            with torch.no_grad():
+                model(input_ids=input_ids[:8], attention_mask=attention_mask[:8])
+        finally:
+            # Remove hooks
+            for h in handles:
+                h.remove()
         
         X = block_inputs.get(block_name)
         Y_star = block_outputs.get(block_name)
