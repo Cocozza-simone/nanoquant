@@ -1,0 +1,8 @@
+{
+  "model_name": "gpt2",
+  "rank": 4,
+  "bits": 1.0,
+  "version": "0.1.0",
+  "num_layers": 0,
+  "layer_metadata": {}
+}
