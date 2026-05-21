@@ -33,9 +33,9 @@ class NanoQuantConfig:
         shrinkage_tau: Clipping threshold for outlier removal
         
         # Refinement
-        pre_tune_steps: Steps for error propagation mitigation
-        post_tune_steps: Steps for factorized component refinement
-        glob_tune_steps: Steps for global scale tuning
+        pre_tune_steps: Steps for error propagation mitigation (TUNEFP)
+        post_tune_steps: Steps for factorized component refinement (TUNELATENT)
+        glob_tune_steps: Steps for global scale tuning (TUNESCALES)
         
         # Block reconstruction
         block_size: Number of transformer layers per block
@@ -71,35 +71,27 @@ class NanoQuantConfig:
     
     # Block Reconstruction Pipeline parameters (from Appendix C of paper)
     # Phase 2 Step 1: TUNEFP (Error Propagation Mitigation)
-    # "We used a learning rate of 1e-4 and a batch size of 4"
-    tune_fp_epochs: int = 8
-    tune_fp_lr: float = 1e-4
-    tune_fp_batch_size: int = 4
-    
-    # Phase 2 Step 3: TUNELATENT (Factorized Component Refinement)
-    # "We used a unified learning rate of 1e-5 and a batch size of 1"
-    tune_latent_epochs: int = 8
-    tune_latent_lr: float = 1e-5
-    tune_latent_batch_size: int = 1
-    
-    # Phase 2 Step 2: TUNESCALES (Global Scale Tuning)
-    tune_scales_epochs: int = 8
-    tune_scales_lr: float = 1e-6
-    tune_scales_batch_size: int = 1
-    
-    # Scheduler
-    use_cosine_scheduler: bool = True
     pre_tune_lr: float = 1e-5
-    post_tune_lr: float = 1e-4
-    glob_tune_lr: float = 1e-3
-    
-    # Refinement steps (legacy support)
     pre_tune_steps: int = 20
+
+    # Phase 2 Step 3: TUNELATENT (Factorized Component Refinement)
+    post_tune_lr: float = 1e-4
     post_tune_steps: int = 50
+
+    # Phase 3: TUNESCALES (Global Scale Tuning)
+    glob_tune_lr: float = 1e-3
     glob_tune_steps: int = 30
     
-    # Block reconstruction
-    block_size: int = 1  # Process one transformer block at a time
+    # Block reconstruction (Phase 2 Algorithm 1)
+    block_size: int = 1
+
+    # Block I/O forward pass sample limit for memory efficiency
+    # Default 8 is from paper; set to calib_samples/4 for large models
+    block_io_samples: int = 8
+
+    # Gradient calibration sample limit for preconditioner estimation
+    # Asymmetric because gradient backprop is more expensive than forward
+    grad_calib_samples: int = 32
     
     # Evaluation
     eval_datasets: List[str] = field(default_factory=lambda: ["wikitext"])
@@ -131,8 +123,8 @@ class NanoQuantConfig:
                 self.calib_samples = 64
             if self.calib_seq_len > 1024:
                 self.calib_seq_len = 1024
-            if self.tune_fp_batch_size > 2:
-                self.tune_fp_batch_size = 2
+            if self.calib_batch_size > 2:
+                self.calib_batch_size = 2
         
         # CPU has more RAM but slower computation
         elif self.device == "cpu":
@@ -145,10 +137,10 @@ class NanoQuantConfig:
     @property
     def effective_bits(self) -> float:
         """Calculate effective bits per parameter."""
-        # For rank-r factorization with 2 scales per layer:
-        # bits = (2 * r * (din + dout) + din + dout) / (din * dout)
-        # This is approximately 2*r / max(din, dout) for large matrices
-        return self.bits
+        raise NotImplementedError(
+            "Use per-layer BPW from NanoQuantizer._log_compression_stats() "
+            "which uses real layer dimensions. See paper eq. 43."
+        )
     
     def adapt_for_model_family(self, model_name: str):
         """Adapt hyperparameters based on model family."""

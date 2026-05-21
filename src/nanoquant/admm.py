@@ -115,17 +115,15 @@ class LatentBinaryADMM:
         logger.debug(f"ADMM: W_f shape {W_f.shape}, rank {r}")
         
         for k in range(self.num_iterations):
-            U_prev = U.clone()
-            V_prev = V.clone()
-            
+
             # Step 1: Update U (solve linear system)
             # (V^T V + (rho + lambda)I) U^T = V^T W_f^T + rho(Z_U - Lambda_U)^T
             # Equation (5)
             VtV = V.T @ V  # [r, r]
             A = VtV + (self.rho + self.lambda_reg) * torch.eye(r, device=self.device)
-            
+
             B = V.T @ W_f.T + self.rho * (Z_U - Lambda_U).T  # [r, d_out]
-            
+
             # Solve using Cholesky decomposition (O(r^3/3) vs O(2r^3/3))
             try:
                 L = torch.linalg.cholesky(A)
@@ -134,13 +132,13 @@ class LatentBinaryADMM:
             except Exception as e:
                 logger.warning(f"Cholesky failed at iter {k}: {e}, using pinv")
                 U = (torch.linalg.pinv(A) @ B).T
-            
+
             # Step 2: Update V (symmetric to U)
             UtU = U.T @ U  # [r, r]
             A_v = UtU + (self.rho + self.lambda_reg) * torch.eye(r, device=self.device)
-            
+
             B_v = U.T @ W_f + self.rho * (Z_V - Lambda_V).T  # [r, d_in]
-            
+
             try:
                 L_v = torch.linalg.cholesky(A_v)
                 V_T = torch.cholesky_solve(B_v, L_v)
@@ -198,9 +196,8 @@ class LatentBinaryADMM:
         Returns:
             Balanced (U, V, s1, s2)
         """
-        d_out, rank = U.shape
-        d_in, _ = V.shape
-        
+        # shape: U [d_out, rank], V [d_in, rank]
+
         # Apply preconditioner inverse (Equation 9: depreconditioning)
         # Paper: Û = P_U^(K) · D̃_out^{-1}, so divide by sqrt(D), not multiply
         if D_out is not None:

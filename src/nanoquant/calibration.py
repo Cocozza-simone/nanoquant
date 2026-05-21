@@ -353,7 +353,7 @@ class GlobalCalibration:
                 handles.append(h)
 
         # Limit gradient samples to avoid excessive memory/time
-        grad_num_samples = min(num_samples, 32)
+        grad_num_samples = min(num_samples, self.config.grad_calib_samples)
         logger.info(f"Collecting gradient statistics from {grad_num_samples} samples...")
 
         for i in range(grad_num_samples):

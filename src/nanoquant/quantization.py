@@ -362,7 +362,7 @@ class NanoQuantizer:
         try:
             # Forward pass
             with torch.no_grad():
-                model(input_ids=input_ids[:8], attention_mask=attention_mask[:8])
+                model(input_ids=input_ids[:self.config.block_io_samples], attention_mask=attention_mask[:self.config.block_io_samples])
         finally:
             # Remove hooks
             for h in handles:
@@ -375,7 +375,7 @@ class NanoQuantizer:
             logger.warning(f"Could not capture block {block_name} I/O, using defaults")
             # Use model embedding output as default
             with torch.no_grad():
-                outputs = model(input_ids=input_ids[:8], attention_mask=attention_mask[:8], output_hidden_states=True)
+                outputs = model(input_ids=input_ids[:self.config.block_io_samples], attention_mask=attention_mask[:self.config.block_io_samples], output_hidden_states=True)
                 X = outputs.hidden_states[0] if hasattr(outputs, "hidden_states") else outputs[0]
                 Y_star = X.clone()
         

@@ -11,6 +11,8 @@ import logging
 from typing import Optional, Dict, Any
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from .device_utils import get_optimal_device
+from .reconstruction import FactorizedLinear
+from .kernels import OptimizedFactorizedLinear
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +77,7 @@ class NanoQuantInferenceEngine:
         
         # Replace FactorizedLinear with OptimizedFactorizedLinear
         for name, module in self.model.named_modules():
-            if module.__class__.__name__ == "FactorizedLinear":
+            if isinstance(module, (FactorizedLinear, OptimizedFactorizedLinear)):
                 try:
                     optimized = create_optimized_linear_from_factorized(module, packed=True)
                     
@@ -158,7 +160,7 @@ class NanoQuantInferenceEngine:
         float_params = 0
         
         for name, module in self.model.named_modules():
-            if module.__class__.__name__ in ("FactorizedLinear", "OptimizedFactorizedLinear"):
+            if isinstance(module, (FactorizedLinear, OptimizedFactorizedLinear)):
                 binary_params += module.d_out * module.rank + module.d_in * module.rank
                 float_params += module.d_out + module.d_in  # scales
             elif isinstance(module, nn.Linear):
